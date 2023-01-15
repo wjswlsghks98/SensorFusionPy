@@ -26,10 +26,11 @@ class Optimizer:
         self.covs = kwargs['covs'] # Covariance matrices for sensors
         self.options = kwargs['options'] # Optimization options
         self.bias = [] # Bias variables saver
+        self.states = [] # State variables saver
         self.bgd_thres = 1e-2 # Gyro bias repropagation threshold
         self.bad_thres = 1e-3 # Accel bias repropagation threshold
-        self.params = np.array([1.5,0,1])
-
+        self.params = vert(np.array([1.5,0,1]))
+        
         for i in range(len(self.imu)):
             bias = Bias(self.imu_bias)
             self.bias.append(bias)
@@ -47,7 +48,6 @@ class Optimizer:
         nba_cov = self.covs.imu.AccelerometerNoise # Should be already in np array format
         n_cov = sp.linalg.block_diag(nbg_cov,nba_cov)
 
-        
         for idx in idxs:
 
             # self.imu should be defined in data processing process
@@ -133,21 +133,114 @@ class Optimizer:
         Implemented by JinHwan Jeon, 2023
         
         """
-    
         print("INS Propagation")
         th = pi/2 - pi/180 * self.gnss.bearing[0]
         R = np.array([[np.cos(th), -np.sin(th), 0],
                       [np.sin(th), np.cos(th), 0],
                       [0, 0, 1]])
         Vned = self.gnss.vNED[0,:]
-        V = np.zeros((3,1))
-        V[0] = Vned[1]; V[1] = Vned[0]; V[2] = -Vned[2]
+        V = vert(np.array([Vned[1],Vned[0],-Vned[2]]))
         lat, lon, alt = pm.geodetic2enu(self.gnss.pos[0,0],self.gnss.pos[0,1],self.gnss.pos[0,2],
                             self.gnss.lla0[0],self.gnss.lla0[1],self.gnss.lla0[2])
-        P = np.zeros((3,1))
-        P[0] = lat; P[1] = lon; P[2] = alt
+        P = vert(np.array([lat, lon, alt]))
+        grav = vert(np.array([0,0,-9.81]))
+        
+        state = State(R,V,P)
+
+        # Add Lane information in the future
+
+        self.states.append(state)
+
+        # For initial state(only), add bias information for convenience
+        state.bg = self.bias[0].bg
+        state.ba = self.bias[0].ba
+        state.bgd = self.bias[0].bgd
+        state.bad = self.bias[0].bad
+        state.L = self.params
+
+        self.init_state = state
+
+        for imu in self.imu:
+            delRij = imu.delRij
+            delVij = imu.delVij
+            delPij = imu.delPij
+            dtij = imu.dtij
+
+            P = P + V * dtij + 1/2 * grav * dtij**2 + R @ delPij
+            V = V + grav * dtij + R @ delVij
+            R = R * delRij
+            state = State(R,V,P)
+            self.states.append(state)
+
+    def cost_func(self,x0):
+        """
+        Augment cost function residual and jacobian
+
+        """
+        self.retract(x0,'normal')
         
 
+    
+    def retract(self,delta,mode):
+        """
+        Update variables using delta values
+
+        """
+        n = len(self.states)
+        state_delta = delta[0:9*n]
+        bias_ddelta = delta[9*n:15*n]
+
+        self.retractStates(state_delta)
+        self.retractBias(bias_ddelta,mode)
+
+        if self.mode != 'basic':
+            wsf_delta = delta[15*n:16*n]
+            self.retractWSF(wsf_delta)
+
+
+    def retractStates(self,state_delta):
+        n = len(self.states)
+        for i in range(n):
+            deltaR = state_delta[9*(i-1):9*(i-1)+3]
+            deltaV = state_delta[9*(i-1)+3:9*(i-1)+6]
+            deltaP = state_delta[9*(i-1)+6:9*(i-1)+9]
+
+            R = self.states[i].R
+            V = self.states[i].V
+            P = self.states[i].P
+
+            P_ = P + R @ deltaP
+            V_ = V + deltaV
+            R_ = R @ Exp_map(deltaR)
+
+            self.states[i].R = R_
+            self.states[i].V = V_
+            self.states[i].P = P_
+
+    def retractBias(self,bias_ddelta,mode):
+        n = len(self.bias)
+        idxs = []
+        for i in range(n):
+            bgd_ = bias_ddelta[6*(i-1):6*(i-1)+3]
+            bad_ = bias_ddelta[6*(i-1)+3:6*(i-1)+6]
+            new_bgd = bgd_ + self.bias[i].bgd
+            new_bad = bad_ + self.bias[i].bad
+
+            flag = False
+
+            if mode == 'final':
+                # After finishing optimization, all delta terms are 
+                # transferred to the original bias variables
+                # Flush delta values!
+                bg_ = self.bias[i].bg + new_bgd
+                bgd_ = np.zeros((3,1))
+                ba_ = self.bias[i].ba + new_bad
+                bad_ = np.zeros((3,1))
+
+    def retractWSF(self,wsf_delta):
+        """
+        
+        """
 
 
     @staticmethod
@@ -176,10 +269,15 @@ class Bias:
         self.bad = np.zeros((3,1))       
 
 class State:
+    """
+    Definition of 3D Vehicle States 
+    
+    """
     def __init__(self,R,V,P):
-        self.R = R
-        self.V = V
-        self.P = P
+        self.R = R # 3D Rotational Matrix(Attitude)
+        self.V = V # Velocity Vector
+        self.P = P # Position Vector
+        self.WSF = 1 # Wheel Speed Scaling Factor
 
 if __name__ == '__main__':
     # imu_bias = dict(gyro=np.array([0,0,0]),accel=np.array([0,0,0]))
