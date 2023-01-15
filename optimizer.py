@@ -172,14 +172,142 @@ class Optimizer:
             state = State(R,V,P)
             self.states.append(state)
 
-    def cost_func(self,x0):
+    def optimize(self):
+        print("Optimization Starts...")
+
+        n = len(self.states)
+
+        if (self.mode != '2-phase') and (self.mode != 'full'):
+            # Run optimization depending on algorithm options
+            #
+            # [Basic Mode]: INS + GNSS Fusion
+            # [Partial Mode]: INS + GNSS + WSS Fusion
+            
+            if self.mode == 'basic':
+                x0 = np.zeros((15*n,1))
+            elif self.mode == 'partial':
+                x0 = np.zeros((16*n,1))
+
+            if self.options.Algorithm == 'GN':
+                self.GaussNewton(x0)
+            elif self.options.Algorithm == 'TR':
+                self.TrustRegion(x0)
+
+    def GaussNewton(self,x0):
         """
-        Augment cost function residual and jacobian
+        Gauss-Newton method shows very fast convergence compared to
+        Trust-Region method, but suffers from low convergence stability
+        near the local minima (oscillation frequently observed)
+        Oscillation detection was implemented to reduce meaningless iterations
 
         """
-        self.retract(x0,'normal')
+        print("[SNLS Solver: Gauss-Newton Method]")
+        print("Iteration            f(x)              step size")
+
+        res, jac = self.cost_func(x0)
+        prev_cost = np.linalg.norm(res)**2
+        print('  {0:3d}   {1:7d}   {2:5d}'.format(0,prev_cost,np.linalg.norm(x0)))
+
+        i=1
+        cost_stack = [prev_cost]
+
+        while True:
+            A = jac.T @ jac # Check if @ is supported for sparse matrix multiplication
+            b = -jac.T @ res
+
+            x0 = sp.sparse.linalg.spsolve(A,b)
+            res, jac = self.cost_func(x0)
+            cost = np.linalg.norm(res)**2
+            cost_stack.append(cost)
+            step_size = np.linalg.norm(x0)
+
+            print('  {0:3d}   {1:7d}   {2:5d}'.format(i,cost,step_size))
+
+            # Ending Criterion
+            flags = []
+            flags.append(np.abs(prev_cost - cost) > self.options.CostThres)
+            flags.append(step_size > self.options.StepThres)
+            flags.append(i < self.options.IterThres)
+
+            # Check for oscillation around the local minima
+            if len(cost_stack) >= 5:
+                osc_flag = self.detectOsc(cost_stack)
+            else:
+                osc_flag = False
+
+            if np.sum(np.array(flags)) != len(flags):
+                self.retract(x0,'final')
+                print("Optimization Finished...")
+                idx = np.where(flags == 0)[0]
+
+                if idx == 0:
+                    print('Current Cost Difference {0} is below threshold {1}'.format(np.abs(prev_cost - cost), self.options.CostThres))
+                elif idx == 1:
+                    print('Current Step Size {0} is below threshold {1}'.format(step_size, self.options.StepThres))
+                elif idx == 2:
+                    print('Current Iteration Number {0} is above threshold {1}'.format(i, self.options.IterThres))
+                
+                break
+            elif osc_flag:
+                self.retract(x0,'final')
+                print("Optimization Finished...")
+                print("Oscillation about the local minima detected")
+                break
+            else:
+                i += 1
+                prev_cost = cost
+
+    def TrustRegion(self,x0):
+        """
+        Indefinite Gauss-Newton-Powell's Dog-Leg algorithm
+        Implemented "RISE: An Incremental Trust Region Method for Robust Online Sparse Least-Squares Estimation"
+        by David M. Rosen etal
         
+        Implemented in Python3 by JinHwan Jeon, 2023
+        
+        Original paper considers case for rank-deficient Jacobians,
+        but in this sensor fusion framework, Jacobian must always be
+        full rank. Therefore, 'rank-deficient Jacobian' part of the
+        algorithm is not implemented.
+        
+        Moreover, the core part of the algorithm is "incremental"
+        trust region method, but here the optimization is done in a
+        batch manner. Therefore incremental solver framework is not
+        adopted in this implementation.
+        
+        """
 
+    def cost_func(self,x0):
+        self.retract(x0,'normal')
+        Pr_res, Pr_jac = self.CreatePrBlock()
+        MM_res, MM_jac = self.CreateMMBlock()
+        GNSS_res, GNSS_jac = self.CreateGNSSBlock()
+        WSS_res, WSS_jac = self.CreateWSSBlock()
+
+        res = sp.sparse.vstack([Pr_res, MM_res, GNSS_res, WSS_res])
+        jac = sp.sparse.vstack([Pr_jac, MM_jac, GNSS_jac, WSS_jac])
+
+        return res, jac
+
+    def CreatePrBlock(self):
+        """
+        
+        """
+
+    def CreateMMBlock(self):
+        """
+        
+        """
+
+    def CreateGNSSBlock(self):
+        """
+        
+        """
+
+    def CreateWSSBlock(self):
+        """
+        
+        """
     
     def retract(self,delta,mode):
         """
@@ -197,13 +325,12 @@ class Optimizer:
             wsf_delta = delta[15*n:16*n]
             self.retractWSF(wsf_delta)
 
-
     def retractStates(self,state_delta):
         n = len(self.states)
         for i in range(n):
-            deltaR = state_delta[9*(i-1):9*(i-1)+3]
-            deltaV = state_delta[9*(i-1)+3:9*(i-1)+6]
-            deltaP = state_delta[9*(i-1)+6:9*(i-1)+9]
+            deltaR = vert(state_delta[9*(i-1):9*(i-1)+3])
+            deltaV = vert(state_delta[9*(i-1)+3:9*(i-1)+6])
+            deltaP = vert(state_delta[9*(i-1)+6:9*(i-1)+9])
 
             R = self.states[i].R
             V = self.states[i].V
@@ -221,8 +348,8 @@ class Optimizer:
         n = len(self.bias)
         idxs = []
         for i in range(n):
-            bgd_ = bias_ddelta[6*(i-1):6*(i-1)+3]
-            bad_ = bias_ddelta[6*(i-1)+3:6*(i-1)+6]
+            bgd_ = vert(bias_ddelta[6*(i-1):6*(i-1)+3])
+            bad_ = vert(bias_ddelta[6*(i-1)+3:6*(i-1)+6])
             new_bgd = bgd_ + self.bias[i].bgd
             new_bad = bad_ + self.bias[i].bad
 
@@ -236,6 +363,38 @@ class Optimizer:
                 bgd_ = np.zeros((3,1))
                 ba_ = self.bias[i].ba + new_bad
                 bad_ = np.zeros((3,1))
+            
+            elif mode == 'normal':
+                # If delta bias values are larger than threshold,
+                # perform repropgation (IMU)
+                # Else, accumulate delta values
+
+                if np.linalg.norm(new_bgd) > self.bgd_thres:
+                    bg_ = self.bias[i].bg + new_bgd
+                    bgd_ = np.zeros((3,1))
+                    flag = True
+                else:
+                    bg_ = self.bias[i].bg
+                    bgd_ = new_bgd
+                
+                if np.linalg.norm(new_bad) > self.bad_thres:
+                    ba_ = self.bias[i].ba + new_bad
+                    bad_ = np.zeros((3,1))
+                    flag = True
+                else:
+                    ba_ = self.bias[i].ba
+                    bad_ = new_bad
+            
+            if flag and i != n-1:
+                idxs.append(i)
+            
+            self.bias[i].bg = bg_
+            self.bias[i].ba = ba_
+            self.bias[i].bgd = bgd_
+            self.bias[i].bad = bad_
+
+        if len(idxs) > 0:
+            self.integrate(idxs)
 
     def retractWSF(self,wsf_delta):
         """
@@ -260,6 +419,16 @@ class Optimizer:
         Bk[6:9,3:6] = 1/2 * delRik * dt_k**2
 
         return Ak, Bk
+
+    @staticmethod
+    def detectOsc(cost_stack):
+        last_five = np.array(cost_stack[-5::1])
+        avg = np.mean(last_five)
+        delta = last_five - avg
+        if np.max(delta) < 1e2:
+            return True
+        else:
+            return False
 
 class Bias:
     def __init__(self,imu_bias):
