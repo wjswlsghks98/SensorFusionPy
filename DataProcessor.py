@@ -358,7 +358,7 @@ def Extension(Data,ExtData):
 
 if __name__ == '__main__':
     # Target folder paths
-    folder_paths = ["./SejongDataset/2023-01-26--18-39-41/","./SejongDataset/2023-01-26--19-49-58/"]
+    folder_paths = ["D/SJ_Dataset/2023/2023-01-26--18-39-41/","D/SJ_Dataset/2023/2023-01-26--19-49-58/"]
 
     for folder_path in folder_paths:
         print("=====================================================================")
