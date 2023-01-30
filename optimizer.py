@@ -36,7 +36,7 @@ class Optimizer:
             self.bias.append(bias)
         
         # For initialization, integrate IMU over full timestep
-        self.integrate(list(range(len(self.imu))))
+        self.integrate(list(range(len(self.imu)))) 
 
     def integrate(self,idxs):
         """
@@ -276,6 +276,15 @@ class Optimizer:
         adopted in this implementation.
         
         """
+
+        print("SNLS Solver: Approximate Trust-Region Method")
+        print("Iteration            f(x)              step size              TR_radius              Acceptance")
+
+        tr_rad = 10
+        res, jac = self.cost_func(x0)
+        prev_cost = np.linalg.norm(res)**2
+        
+
 
     def cost_func(self,x0):
         self.retract(x0,'normal')
